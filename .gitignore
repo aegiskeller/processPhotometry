@@ -1,0 +1,40 @@
+# FITS data files
+*.fits
+*.fit
+*.fts
+
+# Data directories
+data/
+calibrated/
+bkup/
+FlatV/
+
+# Build artifacts
+build/
+target/
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Images
+*.jpg
+*.png
+*.jpeg
+*.gif
