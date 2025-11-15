@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WOMBAT PHOTOMETRY PIPELINE</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background-color: #0d0d0d;
+            padding: 20px 30px;
+            border-bottom: 2px solid #333;
+        }
+
+        .title {
+            font-size: 24px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            margin-bottom: 15px;
+            color: #fff;
+        }
+
+        .stats-panel {
+            display: flex;
+            gap: 30px;
+            margin: 15px 0;
+            flex-wrap: wrap;
+        }
+
+        .stat-box {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 15px;
+            background-color: #252525;
+            border-radius: 4px;
+            border: 1px solid #333;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #aaa;
+        }
+
+        .stat-value {
+            font-weight: bold;
+            color: #4CAF50;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        
+        .control-button {
+            padding: 8px 16px;
+            background-color: #2a2a2a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            cursor: pointer;
+            border-radius: 4px;
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .control-button:hover {
+            background-color: #353535;
+            border-color: #555;
+        }
+        
+        .control-button.validate-ready {
+            background-color: #2d5016;
+            border-color: #4CAF50;
+            font-weight: bold;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        .control-button.validate-ready:hover {
+            background-color: #3d6821;
+        }
+        
+        .validate-count {
+            background-color: #4CAF50;
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-left: 8px;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 0 5px rgba(76, 175, 80, 0.5);
+            }
+            50% {
+                box-shadow: 0 0 15px rgba(76, 175, 80, 0.8);
+            }
+        }        .main-content {
+            flex: 1;
+            padding: 0;
+        }
+
+        .tabs {
+            display: flex;
+            background-color: #0d0d0d;
+            border-bottom: 2px solid #333;
+            padding: 0 30px;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            background-color: transparent;
+            border: none;
+            color: #888;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            font-weight: bold;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            color: #bbb;
+        }
+
+        .tab.active {
+            color: #fff;
+            border-bottom-color: #4CAF50;
+        }
+
+        .tab-content {
+            display: none;
+            padding: 20px 30px;
+            height: calc(100vh - 280px);
+            overflow: auto;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .tab-header {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #fff;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: #1e1e1e;
+            border: 1px solid #333;
+        }
+
+        thead {
+            background-color: #0d0d0d;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        th {
+            padding: 12px;
+            text-align: left;
+            font-weight: bold;
+            font-size: 12px;
+            color: #aaa;
+            border-bottom: 2px solid #333;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+        }
+        
+        th:hover {
+            background-color: #1a1a1a;
+        }
+        
+        th.sortable::after {
+            content: ' ⇅';
+            opacity: 0.3;
+            font-size: 10px;
+        }
+        
+        th.sorted-asc::after {
+            content: ' ↑';
+            opacity: 1;
+            color: #4CAF50;
+        }
+        
+        th.sorted-desc::after {
+            content: ' ↓';
+            opacity: 1;
+            color: #4CAF50;
+        }
+
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #2a2a2a;
+            font-size: 13px;
+        }
+
+        tr:hover {
+            background-color: #252525;
+            cursor: pointer;
+        }
+
+        .status-ready {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+
+        .status-validate {
+            color: #FF9800;
+            font-weight: bold;
+        }
+
+        .status-nocal {
+            color: #f44336;
+        }
+
+        .status-nocomps {
+            color: #FF5722;
+        }
+
+        .status-normal {
+            color: #2196F3;
+        }
+
+        .bool-true {
+            color: #4CAF50;
+        }
+
+        .bool-false {
+            color: #666;
+        }
+
+        .success-text {
+            color: #4CAF50;
+        }
+
+        .error-text {
+            color: #f44336;
+        }
+
+        .detail-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #252525;
+            border: 1px solid #333;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .detail-header {
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+
+        .frame-detail {
+            padding: 8px;
+            margin: 5px 0;
+            background-color: #1e1e1e;
+            border-left: 3px solid #444;
+        }
+
+        .frame-detail.success {
+            border-left-color: #4CAF50;
+        }
+
+        .frame-detail.error {
+            border-left-color: #f44336;
+        }
+
+        .filename {
+            font-size: 11px;
+            color: #bbb;
+        }
+
+        .coords {
+            font-size: 10px;
+            margin-top: 3px;
+        }
+
+        .stats-line {
+            font-size: 9px;
+            color: #888;
+            margin-top: 2px;
+        }
+
+        .footer {
+            background-color: #0d0d0d;
+            padding: 10px 30px;
+            border-top: 2px solid #333;
+        }
+
+        .status-label {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .status-label.success {
+            color: #4CAF50;
+        }
+
+        .status-label.error {
+            color: #f44336;
+        }
+
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a1a1a;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #444;
+            border-radius: 5px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        .numeric {
+            text-align: right;
+            font-family: 'Courier New', monospace;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">WOMBAT PHOTOMETRY PIPELINE</div>
+        
+        <div class="stats-panel">
+            <div class="stat-box">
+                <span class="stat-label">Targets: <span class="stat-value" id="stat-targets">0</span></span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-label">Nights: <span class="stat-value" id="stat-nights">0</span></span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button class="control-button" onclick="refreshData()">↻ Refresh</button>
+            <a href="/validate" class="control-button" id="validate-link">
+                → Validate & Publish
+                <span class="validate-count" id="validate-count" style="display: none;">0</span>
+            </a>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('targets')">Targets</button>
+            <button class="tab" onclick="switchTab('wcs')">WCS Solutions</button>
+            <button class="tab" onclick="switchTab('calibrations')">Calibrations</button>
+        </div>
+
+        <div id="targets-tab" class="tab-content active">
+            <div class="tab-header">Science Targets</div>
+            <table id="targets-table">
+                <thead>
+                    <tr>
+                        <th class="sortable" data-column="date" data-type="string">Date</th>
+                        <th class="sortable" data-column="target_name" data-type="string">Target</th>
+                        <th>Filter</th>
+                        <th class="numeric">Images</th>
+                        <th>Bias</th>
+                        <th>Flat</th>
+                        <th>Photometry</th>
+                        <th>Submitted</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <div id="target-details" class="detail-panel" style="display: none;"></div>
+        </div>
+
+        <div id="wcs-tab" class="tab-content">
+            <div class="tab-header">WCS Plate Solutions</div>
+            <table id="wcs-table">
+                <thead>
+                    <tr>
+                        <th class="sortable" data-column="date" data-type="string">Date</th>
+                        <th class="sortable" data-column="target_name" data-type="string">Target</th>
+                        <th>Filter</th>
+                        <th>Filename</th>
+                        <th>Success</th>
+                        <th class="numeric">RA (deg)</th>
+                        <th class="numeric">Dec (deg)</th>
+                        <th class="numeric">Stars</th>
+                        <th class="numeric">Time (s)</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <div id="calibrations-tab" class="tab-content">
+            <div class="tab-header">Calibration Frames</div>
+            <table id="calibrations-table">
+                <thead>
+                    <tr>
+                        <th class="sortable" data-column="date" data-type="string">Date</th>
+                        <th>Type</th>
+                        <th>Filter</th>
+                        <th class="numeric">Images</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="footer">
+        <div class="status-label" id="status">Ready</div>
+    </div>
+
+    <script>
+        let currentTab = 'targets';
+        let selectedTarget = null;
+        let targetsData = [];
+        let wcsData = [];
+        let calibrationsData = [];
+        let currentSort = {
+            targets: { column: 'date', direction: 'desc' },
+            wcs: { column: 'date', direction: 'desc' },
+            calibrations: { column: 'date', direction: 'desc' }
+        };
+
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(tabName + '-tab').classList.add('active');
+
+            currentTab = tabName;
+        }
+
+        function formatStatus(value) {
+            if (!value || value === '0') return '<span class="bool-false">-</span>';
+            
+            let className = '';
+            if (value === 'ready') className = 'status-ready';
+            else if (value === 'validate') className = 'status-validate';
+            else if (value === 'nocal') className = 'status-nocal';
+            else if (value === 'nocomps') className = 'status-nocomps';
+            else className = 'status-normal';
+            
+            return `<span class="${className}">${value}</span>`;
+        }
+
+        function formatBoolean(value) {
+            const isTrue = value === 1 || value === '1' || value === 'submitted' || value === 'approved';
+            const className = isTrue ? 'bool-true' : 'bool-false';
+            const text = isTrue ? '✓ Yes' : '○ No';
+            return `<span class="${className}">${text}</span>`;
+        }
+
+        function formatNumber(value, precision = 4) {
+            if (!value || value === 0) return '';
+            return Number(value).toFixed(precision);
+        }
+
+        function formatRA(deg) {
+            if (!deg) return '';
+            const hours = deg / 15.0;
+            const h = Math.floor(hours);
+            const m = Math.floor((hours - h) * 60);
+            const s = ((hours - h) * 60 - m) * 60;
+            return `${h}h ${m}m ${s.toFixed(1)}s`;
+        }
+
+        function formatDec(deg) {
+            if (!deg) return '';
+            const sign = deg < 0 ? '-' : '+';
+            const absDeg = Math.abs(deg);
+            const d = Math.floor(absDeg);
+            const m = Math.floor((absDeg - d) * 60);
+            const s = ((absDeg - d) * 60 - m) * 60;
+            return `${sign}${d}° ${m}' ${s.toFixed(1)}"`;
+        }
+
+        async function loadTargets() {
+            try {
+                const response = await fetch('/api/targets/all');
+                targetsData = await response.json();
+                renderTargets();
+                setStatus('✓ Loaded ' + targetsData.length + ' targets', 'success');
+            } catch (error) {
+                setStatus('✗ Error loading targets: ' + error.message, 'error');
+            }
+        }
+        
+        function renderTargets() {
+            const tbody = document.querySelector('#targets-table tbody');
+            tbody.innerHTML = '';
+            
+            if (targetsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No targets found</td></tr>';
+                return;
+            }
+            
+            const sorted = sortData(targetsData, currentSort.targets.column, currentSort.targets.direction);
+            
+            sorted.forEach(target => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${target.date}</td>
+                    <td>${target.target_name}</td>
+                    <td>${target.filter || '-'}</td>
+                    <td class="numeric">${target.num_images}</td>
+                    <td>${formatStatus(target.proc_bias)}</td>
+                    <td>${formatStatus(target.proc_flat)}</td>
+                    <td>${formatStatus(target.apphot)}</td>
+                    <td>${formatBoolean(target.submitted)}</td>
+                `;
+                row.onclick = () => showTargetDetails(target);
+                tbody.appendChild(row);
+            });
+        }
+
+        async function showTargetDetails(target) {
+            selectedTarget = target;
+            const detailPanel = document.getElementById('target-details');
+            detailPanel.style.display = 'block';
+            detailPanel.innerHTML = '<div class="detail-header">Loading WCS solutions...</div>';
+            
+            try {
+                const response = await fetch(`/api/wcs/target/${target.date}/${target.target_name}/${target.filter}`);
+                const solutions = await response.json();
+                
+                detailPanel.innerHTML = `
+                    <div class="detail-header">WCS Solutions: ${target.date}/${target.target_name} (${target.filter}) - ${solutions.length} frames</div>
+                `;
+                
+                if (solutions.length === 0) {
+                    detailPanel.innerHTML += '<div class="empty-state">No WCS solutions found</div>';
+                    return;
+                }
+                
+                solutions.forEach(wcs => {
+                    const frameDiv = document.createElement('div');
+                    frameDiv.className = 'frame-detail ' + (wcs.success ? 'success' : 'error');
+                    
+                    if (wcs.success) {
+                        frameDiv.innerHTML = `
+                            <div class="filename">${wcs.filename}</div>
+                            <div class="coords success-text">
+                                ✓ RA: ${formatRA(wcs.ra_deg)} (${formatNumber(wcs.ra_deg)}°) 
+                                Dec: ${formatDec(wcs.dec_deg)} (${formatNumber(wcs.dec_deg)}°)
+                            </div>
+                            <div class="stats-line">
+                                Stars: ${wcs.num_stars} | 
+                                Faintest: ${formatNumber(wcs.faintest_mag, 1)} mag | 
+                                FOV: ${formatNumber(wcs.fov_deg, 2)}° | 
+                                Time: ${formatNumber(wcs.solve_time, 2)}s
+                            </div>
+                        `;
+                    } else {
+                        frameDiv.innerHTML = `
+                            <div class="filename">${wcs.filename}</div>
+                            <div class="coords error-text">✗ ${wcs.error_message || 'Failed'}</div>
+                        `;
+                    }
+                    
+                    detailPanel.appendChild(frameDiv);
+                });
+                
+            } catch (error) {
+                detailPanel.innerHTML = `<div class="error-text">Error loading details: ${error.message}</div>`;
+            }
+        }
+
+        async function loadWCS() {
+            try {
+                const response = await fetch('/api/wcs/all');
+                wcsData = await response.json();
+                renderWCS();
+                setStatus('✓ Loaded ' + wcsData.length + ' WCS solutions', 'success');
+            } catch (error) {
+                setStatus('✗ Error loading WCS solutions: ' + error.message, 'error');
+            }
+        }
+        
+        function renderWCS() {
+            const tbody = document.querySelector('#wcs-table tbody');
+            tbody.innerHTML = '';
+            
+            if (wcsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No WCS solutions found</td></tr>';
+                return;
+            }
+            
+            const sorted = sortData(wcsData, currentSort.wcs.column, currentSort.wcs.direction);
+            
+            sorted.forEach(wcs => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${wcs.date}</td>
+                    <td>${wcs.target_name}</td>
+                    <td>${wcs.filter || '-'}</td>
+                    <td>${wcs.filename}</td>
+                    <td>${formatBoolean(wcs.success)}</td>
+                    <td class="numeric">${formatNumber(wcs.ra_deg)}</td>
+                    <td class="numeric">${formatNumber(wcs.dec_deg)}</td>
+                    <td class="numeric">${wcs.num_stars || ''}</td>
+                    <td class="numeric">${formatNumber(wcs.solve_time, 2)}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        async function loadCalibrations() {
+            try {
+                const response = await fetch('/api/calibrations/all');
+                calibrationsData = await response.json();
+                renderCalibrations();
+                setStatus('✓ Loaded ' + calibrationsData.length + ' calibrations', 'success');
+            } catch (error) {
+                setStatus('✗ Error loading calibrations: ' + error.message, 'error');
+            }
+        }
+        
+        function renderCalibrations() {
+            const tbody = document.querySelector('#calibrations-table tbody');
+            tbody.innerHTML = '';
+            
+            if (calibrationsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No calibrations found</td></tr>';
+                return;
+            }
+            
+            const sorted = sortData(calibrationsData, currentSort.calibrations.column, currentSort.calibrations.direction);
+            
+            sorted.forEach(cal => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${cal.date}</td>
+                    <td>${cal.cal_type}</td>
+                    <td>${cal.filter || '-'}</td>
+                    <td class="numeric">${cal.num_images}</td>
+                `;
+                tbody.appendChild(row);
+            });
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                document.getElementById('stat-targets').textContent = stats.totalTargets;
+                document.getElementById('stat-nights').textContent = stats.totalNights;
+                
+                // Check for validate-ready targets
+                await updateValidateButton();
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+        
+        async function updateValidateButton() {
+            try {
+                const response = await fetch('/api/targets/validate');
+                const validateTargets = await response.json();
+                const count = validateTargets.length;
+                
+                const link = document.getElementById('validate-link');
+                const countBadge = document.getElementById('validate-count');
+                
+                if (count > 0) {
+                    link.classList.add('validate-ready');
+                    countBadge.textContent = count;
+                    countBadge.style.display = 'inline-block';
+                } else {
+                    link.classList.remove('validate-ready');
+                    countBadge.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Error checking validate targets:', error);
+            }
+        }
+
+        async function refreshData() {
+            setStatus('Refreshing data...', '');
+            await loadStats();
+            await loadTargets();
+            await loadWCS();
+            await loadCalibrations();
+        }
+        
+        function sortData(data, column, direction) {
+            return [...data].sort((a, b) => {
+                let aVal = a[column];
+                let bVal = b[column];
+                
+                // Handle nulls
+                if (aVal === null || aVal === undefined) return 1;
+                if (bVal === null || bVal === undefined) return -1;
+                
+                // String comparison
+                if (typeof aVal === 'string') {
+                    aVal = aVal.toLowerCase();
+                    bVal = bVal.toLowerCase();
+                }
+                
+                if (direction === 'asc') {
+                    return aVal > bVal ? 1 : aVal < bVal ? -1 : 0;
+                } else {
+                    return aVal < bVal ? 1 : aVal > bVal ? -1 : 0;
+                }
+            });
+        }
+        
+        function setupTableSorting() {
+            // Setup sorting for targets table
+            document.querySelectorAll('#targets-table th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const column = th.dataset.column;
+                    if (currentSort.targets.column === column) {
+                        currentSort.targets.direction = currentSort.targets.direction === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        currentSort.targets.column = column;
+                        currentSort.targets.direction = 'desc';
+                    }
+                    updateSortIndicators('#targets-table', currentSort.targets);
+                    renderTargets();
+                });
+            });
+            
+            // Setup sorting for WCS table
+            document.querySelectorAll('#wcs-table th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const column = th.dataset.column;
+                    if (currentSort.wcs.column === column) {
+                        currentSort.wcs.direction = currentSort.wcs.direction === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        currentSort.wcs.column = column;
+                        currentSort.wcs.direction = 'desc';
+                    }
+                    updateSortIndicators('#wcs-table', currentSort.wcs);
+                    renderWCS();
+                });
+            });
+            
+            // Setup sorting for calibrations table
+            document.querySelectorAll('#calibrations-table th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const column = th.dataset.column;
+                    if (currentSort.calibrations.column === column) {
+                        currentSort.calibrations.direction = currentSort.calibrations.direction === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        currentSort.calibrations.column = column;
+                        currentSort.calibrations.direction = 'desc';
+                    }
+                    updateSortIndicators('#calibrations-table', currentSort.calibrations);
+                    renderCalibrations();
+                });
+            });
+            
+            // Set initial sort indicators
+            updateSortIndicators('#targets-table', currentSort.targets);
+            updateSortIndicators('#wcs-table', currentSort.wcs);
+            updateSortIndicators('#calibrations-table', currentSort.calibrations);
+        }
+        
+        function updateSortIndicators(tableSelector, sortInfo) {
+            const table = document.querySelector(tableSelector);
+            table.querySelectorAll('th.sortable').forEach(th => {
+                th.classList.remove('sorted-asc', 'sorted-desc');
+                if (th.dataset.column === sortInfo.column) {
+                    th.classList.add(sortInfo.direction === 'asc' ? 'sorted-asc' : 'sorted-desc');
+                }
+            });
+        }
+
+        function setStatus(message, styleClass) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.classList.remove('success', 'error');
+            if (styleClass) {
+                statusEl.classList.add(styleClass);
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            setupTableSorting();
+            refreshData();
+        });
+    </script>
+</body>
+</html>

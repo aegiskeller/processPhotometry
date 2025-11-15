@@ -15,12 +15,11 @@ If a night contains more than 2 Biases these should be median combined with sigm
 Next we sweep over the target table. For all (night,target,filter) with proc_bias and proc_flat None (or 0) we locate the closest bias and flatfield (forwards or backwards in time) and then process the science data frames. If no appropriate calibration file can be found then proc_{cal type} = 'nocal'. We record the date of the bias frame in proc_BIAS, and the flat in proc_flat. We then plate solve using ASTAP (in Applications) with -update -analyse snr_min. I think we also should allow two '-fov's if it fails 10, 30 degrees. Report details/errors in WCS record to table 'WCS'.
 
 ** Fourth Phase **
-Now we search AAVSO VSX for the target name. From the target information we implement the calculations for time and airmass as per aij coordinate converter. We then obtain the comparison stars in the field (centered on the target) with field of view the extent of the image (from its fits header). The comparison stars come from a query of AAVSO VSP - which is not working today :P
+Now we search AAVSO VSX for the target name. From the target information we implement the calculations for time and airmass as per aij coordinate converter. We then obtain the comparison stars in the field (centered on the target) with field of view the extent of the image (from its fits header). The comparison stars come from a query of AAVSO VSP.
+If VSP service is unavailable set apphot to 'novsp'
 If no comp stars can be found set apphot to 'nocomps'
 
-** Fifth Phase ** 
-
-On pause due to AAVSO VSP down
+** Fifth Phase **
 
 Of the VSP comp stars in the field reject those that do not lie on the extent of the image (use the fits header for this). Reject comp stars that are 1.5 mag brighter than the variable star MinMagV and 1.5 magnitude fainter than the variable's maxMagV. If none remain flag error apphot='nocomps'
 
@@ -28,9 +27,13 @@ For all targets with apphot null, go to the first file and locate a star with pe
 
 Find the comp star that is closest spatially and in magnitude to the variable. This has the special status 'T2', the variable star is 'T1', and the comp stars are C3..N.
 
-Using the RA,Dec of the list of T1,T2,C3...use the image header to determine the image x,y. On that x,y place the apertures defined above and produce the aperture photometry. Do this for each image in the night,target,filter set. G5903.00430_20251015_phot.tbl shows the format required and the various columns like airmass and HJD.
+Using the RA,Dec of the list of T1,T2,C3...use the image header to determine the image x,y. On that x,y place the apertures defined above and produce the aperture photometry. Do this for each image in the night,target,filter set. G5903.00430_20251015_phot.tbl shows the format required and the various columns like airmass and HJD. Then create AAVSO reporting format.
 
 ** Phase Six **
 use the methods of ../stdphot to transform the mags to standards mags. If succeeds set apphot = 'validate'
 
 User validation phase: for each target,night,filter with apphot = 'validate' Produce a lightcurve for T1 & T2 (lower mags at the top)
+
+Now on the front end on a new "Validate & Publish" tab we have a list of (target,filter,night) for which apphot = 'validate'. When the use selects one row a lightcurve is display in a pane of the page. The lightcurve features T1 in blue and T2 in red (with error bars). Lower magnitudes are at ther top for this plot. There are buttons for <Reject> <Approve> (and once approved another button <Push to AAVSO>). Reject marks submitted = 'usrrej'. The plot window has the capacity to zoom, pan, reset zoom, reject points individually or with box select.
+
+Submit Photometric Observations: authenticate: https://auth.aavso.org/u/login?state=hKFo2SA5eUxjdU9uTnNUSDE3UTFoRnhjN3hUMUt2b0ROTlJINqFur3VuaXZlcnNhbC1sb2dpbqN0aWTZIFpyNERlVC1oMkdPVE4tbHVlckxXbjl3SmhxdnlKcE1qo2NpZNkgY1lSMURma2F3dHZmU1c4SXk5anoyV0R2TXZQQU5lVHY
