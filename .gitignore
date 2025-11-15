@@ -38,3 +38,7 @@ Thumbs.db
 *.png
 *.jpeg
 *.gif
+ij_src/
+astroimagej_decompiled/
+G59*
+wombat*
