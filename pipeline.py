@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Automated astronomical data processing pipeline backend.
 Scans data directory, organizes calibration files by filter, and populates SQLite database.
 """
 
 import os
+import sys
 import sqlite3
 import glob
 from pathlib import Path
@@ -27,23 +29,35 @@ from scipy.optimize import curve_fit
 
 
 class WombatPipeline:
-    def __init__(self, data_dir='./data', db_path='wombatpipeline.db', astap_path='/Applications/ASTAP.app/Contents/MacOS/astap'):
+    def __init__(self, data_dir='./data', db_path='wombatpipeline.db', astap_path='C:/Program Files/astap/astap_cli.exe', dry_run=False):
         """
         Initialize the pipeline.
         
         Args:
             data_dir: Root directory containing night subdirectories
             db_path: Path to SQLite database
-            astap_path: Path to ASTAP executable
+            astap_path: Path to ASTAP CLI executable (default: C:/Program Files/astap/astap_cli.exe)
+            dry_run: If True, show what would be done without modifying files or database
         """
         self.data_dir = Path(data_dir)
         self.db_path = db_path
         self.astap_path = astap_path
         self.conn = None
+        self.dry_run = dry_run
+        
+        if self.dry_run:
+            print("="*60)
+            print("DRY RUN MODE - No files or database will be modified")
+            print("="*60)
         
     def setup_database(self):
         """Create database and tables if they don't exist."""
-        self.conn = sqlite3.connect(self.db_path)
+        if self.dry_run:
+            print("[DRY RUN] Would connect to database and create tables if needed")
+            # Use in-memory database for dry run
+            self.conn = sqlite3.connect(':memory:')
+        else:
+            self.conn = sqlite3.connect(self.db_path)
         cursor = self.conn.cursor()
         
         # Create target table
@@ -139,12 +153,18 @@ class WombatPipeline:
         # Create subdirectories and move files
         for filter_name, files in filter_files.items():
             filter_subdir = flat_dir / f"Flat{filter_name}"
-            filter_subdir.mkdir(exist_ok=True)
+            if self.dry_run:
+                print(f"[DRY RUN] Would create directory: {filter_subdir}")
+            else:
+                filter_subdir.mkdir(exist_ok=True)
             
             for fits_file in files:
                 dest = filter_subdir / fits_file.name
                 if not dest.exists():
-                    fits_file.rename(dest)
+                    if self.dry_run:
+                        print(f"[DRY RUN] Would move {fits_file.name} to {filter_subdir.name}/")
+                    else:
+                        fits_file.rename(dest)
                     
         return filter_files
         
@@ -153,6 +173,25 @@ class WombatPipeline:
         if not directory.exists():
             return 0
         return len(list(directory.glob('*.fits')))
+    
+    def extract_filter_from_dirname(self, dirname):
+        """
+        Extract filter name from flat directory name.
+        Handles: FlatV, Flat_V, FlatWizard
+        
+        Args:
+            dirname: Directory name (e.g., 'FlatV', 'Flat_V')
+            
+        Returns:
+            Filter name (e.g., 'V') or the full name if can't parse
+        """
+        # Remove 'Flat' prefix (case insensitive)
+        import re
+        # Match 'Flat' followed by optional underscore, then capture the rest
+        match = re.match(r'[Ff]lat_?(.+)', dirname)
+        if match:
+            return match.group(1)
+        return dirname
         
     def create_master_bias(self, bias_dir):
         """
@@ -176,6 +215,11 @@ class WombatPipeline:
         if len(bias_files) < 3:
             print(f"    Not enough bias frames ({len(bias_files)} < 3) - skipping master bias creation")
             return False
+        
+        # Skip processing in dry-run mode
+        if self.dry_run:
+            print(f"    [DRY RUN] Would create master bias from {len(bias_files)} frames")
+            return True
             
         print(f"    Creating master bias from {len(bias_files)} frames...")
         
@@ -205,7 +249,7 @@ class WombatPipeline:
             hdu.header['HISTORY'] = f'Master bias created from {len(bias_files)} frames'
             hdu.header['HISTORY'] = 'Median combined with 3-sigma clipping'
             hdu.writeto(mbias_path, overwrite=True)
-            
+        
         print(f"    Created master bias: {mbias_path.name}")
         return True
         
@@ -222,7 +266,24 @@ class WombatPipeline:
         """
         mflat_path = flat_dir / f'mflat{filter_name}.fits'
         
-        # Skip if master flat already exists
+        # Check for existing master flat with various naming conventions
+        # Common patterns: mflatV.fits, mFlatV.fits, mVflat.fits, masterFlatV.fits
+        possible_names = [
+            f'mflat{filter_name}.fits',
+            f'mFlat{filter_name}.fits',
+            f'm{filter_name}flat.fits',
+            f'master{filter_name}flat.fits',
+            f'masterFlat{filter_name}.fits',
+            f'MasterFlat{filter_name}.fits',
+        ]
+        
+        for name in possible_names:
+            existing = flat_dir / name
+            if existing.exists():
+                print(f"    Master flat already exists ({name}) - skipping")
+                return False
+        
+        # Skip if our standard master flat already exists
         if mflat_path.exists():
             print(f"    Master flat already exists - skipping")
             return False
@@ -235,6 +296,11 @@ class WombatPipeline:
         if len(flat_files) < 3:
             print(f"    Not enough flat frames ({len(flat_files)} < 3) - skipping master flat creation")
             return False
+        
+        # Skip processing in dry-run mode
+        if self.dry_run:
+            print(f"    [DRY RUN] Would create master flat{filter_name} from {len(flat_files)} frames")
+            return True
             
         print(f"    Creating master flat{filter_name} from {len(flat_files)} frames...")
         
@@ -273,7 +339,7 @@ class WombatPipeline:
             hdu.header['HISTORY'] = f'Master flat created from {len(normalized_flats)} frames'
             hdu.header['HISTORY'] = 'Normalized and median combined with 3-sigma clipping'
             hdu.writeto(mflat_path, overwrite=True)
-            
+        
         print(f"    Created master flat: {mflat_path.name}")
         return True
         
@@ -291,6 +357,13 @@ class WombatPipeline:
         flat_dir = night_dir / 'Flat'
         light_dir = night_dir / 'Light'
         
+        # Support alternative structure: FLAT and LIGHT directories
+        # Check for uppercase FLAT and LIGHT as well
+        if not flat_dir.exists() and (night_dir / 'FLAT').exists():
+            flat_dir = night_dir / 'FLAT'
+        if not light_dir.exists() and (night_dir / 'LIGHT').exists():
+            light_dir = night_dir / 'LIGHT'
+        
         # Check if Light directory exists - if not, ignore this night
         if not light_dir.exists():
             print(f"  No Light directory found - skipping night {night_name}")
@@ -302,37 +375,112 @@ class WombatPipeline:
         if bias_dir.exists():
             num_bias = self.count_images(bias_dir)
             if num_bias > 0:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
-                    VALUES (?, ?, ?, ?)
-                ''', (night_name, 'Bias', None, num_bias))
-                print(f"  Added Bias calibration: {num_bias} images")
+                if self.dry_run:
+                    print(f"  [DRY RUN] Would add Bias calibration: {num_bias} images")
+                else:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
+                        VALUES (?, ?, ?, ?)
+                    ''', (night_name, 'Bias', None, num_bias))
+                    print(f"  Added Bias calibration: {num_bias} images")
                 
                 # Create master bias if needed
                 self.create_master_bias(bias_dir)
         
         # Process Flat calibrations
         if flat_dir.exists():
-            # First organize flats by filter if needed
-            fits_in_flat = list(flat_dir.glob('*.fits'))
-            if fits_in_flat:
-                print(f"  Organizing {len(fits_in_flat)} flat frames by filter...")
-                filter_files = self.organize_flats_by_filter(flat_dir)
-            
-            # Now count flats in each filter subdirectory
-            for filter_subdir in flat_dir.glob('Flat*'):
-                if filter_subdir.is_dir():
-                    filter_name = filter_subdir.name.replace('Flat', '')
-                    num_flats = self.count_images(filter_subdir)
-                    if num_flats > 0:
-                        cursor.execute('''
-                            INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
-                            VALUES (?, ?, ?, ?)
-                        ''', (night_name, 'Flat', filter_name, num_flats))
-                        print(f"  Added Flat{filter_name} calibration: {num_flats} images")
-                        
-                        # Create master flat if needed
-                        self.create_master_flat(filter_subdir, filter_name)
+            # Check for FlatWizard subdirectory (common structure)
+            flat_wizard_dir = flat_dir / 'FlatWizard'
+            if flat_wizard_dir.exists() and flat_wizard_dir.is_dir():
+                # Check for loose FITS files that need organizing
+                fits_in_flat = list(flat_wizard_dir.glob('*.fits'))
+                if fits_in_flat:
+                    print(f"  Found {len(fits_in_flat)} flat frames in FlatWizard subdirectory")
+                    print(f"  Organizing flat frames by filter...")
+                    # Organize directly from FlatWizard into filter subdirectories
+                    filter_files = self.organize_flats_by_filter(flat_wizard_dir)
+                    
+                    # Report and process each filter
+                    for filter_name, files in filter_files.items():
+                        num_flats = len(files)
+                        if num_flats > 0:
+                            if self.dry_run:
+                                print(f"  [DRY RUN] Would add Flat{filter_name} calibration: {num_flats} images")
+                            else:
+                                cursor.execute('''
+                                    INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
+                                    VALUES (?, ?, ?, ?)
+                                ''', (night_name, 'Flat', filter_name, num_flats))
+                                print(f"  Added Flat{filter_name} calibration: {num_flats} images")
+                            
+                            # Create master flat if needed (use the subdirectory path)
+                            filter_subdir = flat_wizard_dir / f"Flat{filter_name}"
+                            if not self.dry_run or filter_subdir.exists():
+                                self.create_master_flat(filter_subdir, filter_name)
+                else:
+                    # No loose files - check for already-organized Flat* subdirectories
+                    filter_subdirs = list(flat_wizard_dir.glob('Flat*'))
+                    if filter_subdirs:
+                        for filter_subdir in filter_subdirs:
+                            if filter_subdir.is_dir():
+                                filter_name = self.extract_filter_from_dirname(filter_subdir.name)
+                                num_flats = self.count_images(filter_subdir)
+                                if num_flats > 0:
+                                    if self.dry_run:
+                                        print(f"  [DRY RUN] Would add Flat{filter_name} calibration: {num_flats} images")
+                                    else:
+                                        cursor.execute('''
+                                            INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
+                                            VALUES (?, ?, ?, ?)
+                                        ''', (night_name, 'Flat', filter_name, num_flats))
+                                        print(f"  Added Flat{filter_name} calibration: {num_flats} images")
+                                    
+                                    # Create master flat if needed
+                                    self.create_master_flat(filter_subdir, filter_name)
+            else:
+                # Original behavior: look for flats directly in Flat directory
+                fits_in_flat = list(flat_dir.glob('*.fits'))
+                if fits_in_flat:
+                    print(f"  Organizing {len(fits_in_flat)} flat frames by filter...")
+                    filter_files = self.organize_flats_by_filter(flat_dir)
+                    
+                    # Report and process each filter
+                    for filter_name, files in filter_files.items():
+                        num_flats = len(files)
+                        if num_flats > 0:
+                            if self.dry_run:
+                                print(f"  [DRY RUN] Would add Flat{filter_name} calibration: {num_flats} images")
+                            else:
+                                cursor.execute('''
+                                    INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
+                                    VALUES (?, ?, ?, ?)
+                                ''', (night_name, 'Flat', filter_name, num_flats))
+                                print(f"  Added Flat{filter_name} calibration: {num_flats} images")
+                            
+                            # Create master flat if needed
+                            filter_subdir = flat_dir / f"Flat{filter_name}"
+                            if not self.dry_run or filter_subdir.exists():
+                                self.create_master_flat(filter_subdir, filter_name)
+                else:
+                    # No loose files - check for already-organized Flat* subdirectories
+                    filter_subdirs = list(flat_dir.glob('Flat*'))
+                    if filter_subdirs:
+                        for filter_subdir in filter_subdirs:
+                            if filter_subdir.is_dir() and filter_subdir.name != 'FlatWizard':
+                                filter_name = self.extract_filter_from_dirname(filter_subdir.name)
+                                num_flats = self.count_images(filter_subdir)
+                                if num_flats > 0:
+                                    if self.dry_run:
+                                        print(f"  [DRY RUN] Would add Flat{filter_name} calibration: {num_flats} images")
+                                    else:
+                                        cursor.execute('''
+                                            INSERT OR REPLACE INTO cal (date, cal_type, filter, num_images)
+                                            VALUES (?, ?, ?, ?)
+                                        ''', (night_name, 'Flat', filter_name, num_flats))
+                                        print(f"  Added Flat{filter_name} calibration: {num_flats} images")
+                                    
+                                    # Create master flat if needed
+                                    self.create_master_flat(filter_subdir, filter_name)
         
         # Process Light targets
         for target_dir in light_dir.iterdir():
@@ -341,6 +489,53 @@ class WombatPipeline:
                 
                 # Get all FITS files and group by filter
                 fits_files = list(target_dir.glob('*.fits'))
+                
+                # Check for AAVSO reports indicating completed work
+                # Look in both target directory and Reduced_images/ReducedImages subdirectory (legacy naming)
+                aavso_reports = list(target_dir.glob('AAVSO_AID_Report_*.txt'))
+                reduced_dir = target_dir / 'Reduced_images'
+                reduced_dir_legacy = target_dir / 'ReducedImages'
+                if reduced_dir.exists():
+                    aavso_reports.extend(list(reduced_dir.glob('AAVSO_AID_Report_*.txt')))
+                elif reduced_dir_legacy.exists():
+                    aavso_reports.extend(list(reduced_dir_legacy.glob('AAVSO_AID_Report_*.txt')))
+                    reduced_dir = reduced_dir_legacy  # Use legacy dir for subsequent checks
+                
+                photometry_tables = list(target_dir.glob('*_photometry.tbl'))
+                if reduced_dir.exists():
+                    photometry_tables.extend(list(reduced_dir.glob('*_photometry.tbl')))
+                
+                # If AAVSO report exists (regardless of FITS files), this is completed/submitted work
+                if aavso_reports:
+                    # Try to determine filter from FITS files if present
+                    if fits_files:
+                        # Get filter from first FITS file
+                        filter_name = self.get_filter_from_fits(fits_files[0])
+                        num_images = len(fits_files)
+                    else:
+                        # No FITS files - use default
+                        filter_name = 'V'
+                        num_images = 0
+                    
+                    if self.dry_run:
+                        print(f"  [DRY RUN] Would add completed target: {target_name} (filter: {filter_name}, submitted)")
+                    else:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO target (date, target_name, filter, num_images, proc_bias, proc_flat, apphot, submitted)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (night_name, target_name, filter_name, num_images, 'completed', 'completed', 'submitted', 1))
+                            print(f"  Added completed target: {target_name} (filter: {filter_name}, work already submitted)")
+                        except sqlite3.IntegrityError:
+                            # Update existing entry to mark as submitted
+                            cursor.execute('''
+                                UPDATE target SET submitted = 1, apphot = 'submitted'
+                                WHERE date = ? AND target_name = ?
+                            ''', (night_name, target_name))
+                            print(f"  Updated target: {target_name} - marked as submitted")
+                    continue
+                
+                # No AAVSO report - process as normal target needing work
                 filter_counts = {}
                 
                 for fits_file in fits_files:
@@ -351,14 +546,17 @@ class WombatPipeline:
                 
                 # Insert a row for each filter
                 for filter_name, num_images in filter_counts.items():
-                    try:
-                        cursor.execute('''
-                            INSERT INTO target (date, target_name, filter, num_images, proc_bias, proc_flat, apphot, submitted)
-                            VALUES (?, ?, ?, ?, 0, 0, 0, 0)
-                        ''', (night_name, target_name, filter_name, num_images))
-                        print(f"  Added target: {target_name} (filter: {filter_name}, images: {num_images})")
-                    except sqlite3.IntegrityError:
-                        print(f"  Target {target_name} with filter {filter_name} already exists for {night_name} - skipping")
+                    if self.dry_run:
+                        print(f"  [DRY RUN] Would add target: {target_name} (filter: {filter_name}, images: {num_images})")
+                    else:
+                        try:
+                            cursor.execute('''
+                                INSERT INTO target (date, target_name, filter, num_images, proc_bias, proc_flat, apphot, submitted)
+                                VALUES (?, ?, ?, ?, 0, 0, 0, 0)
+                            ''', (night_name, target_name, filter_name, num_images))
+                            print(f"  Added target: {target_name} (filter: {filter_name}, images: {num_images})")
+                        except sqlite3.IntegrityError:
+                            print(f"  Target {target_name} with filter {filter_name} already exists for {night_name} - skipping")
         
         self.conn.commit()
         
@@ -398,10 +596,47 @@ class WombatPipeline:
         cal_date = result[0]
         
         # Build path to calibration file
-        if cal_type == 'Bias':
-            cal_path = self.data_dir / cal_date / 'Bias' / 'mbias.fits'
+        # If data_dir is a single night directory, look in parent for other dates
+        if self.data_dir.name == target_date:
+            # data_dir IS the night directory, so parent contains all nights
+            base_dir = self.data_dir.parent / cal_date
         else:
-            cal_path = self.data_dir / cal_date / 'Flat' / f'Flat{filter_name}' / f'mflat{filter_name}.fits'
+            # data_dir contains multiple night directories
+            base_dir = self.data_dir / cal_date
+        
+        if cal_type == 'Bias':
+            cal_path = base_dir / 'Bias' / 'mbias.fits'
+        else:
+            # Try to find master flat with various naming conventions
+            flat_base_dir = base_dir / 'Flat'
+            
+            # Check for FlatWizard subdirectory structure first
+            flat_wizard_dir = flat_base_dir / 'FlatWizard' / f'Flat{filter_name}'
+            if flat_wizard_dir.exists():
+                flat_search_dir = flat_wizard_dir
+            else:
+                flat_search_dir = flat_base_dir / f'Flat{filter_name}'
+            
+            # Try various naming conventions
+            possible_names = [
+                f'mflat{filter_name}.fits',
+                f'mFlat{filter_name}.fits',
+                f'm{filter_name}flat.fits',
+                f'master{filter_name}flat.fits',
+                f'masterFlat{filter_name}.fits',
+                f'MasterFlat{filter_name}.fits',
+            ]
+            
+            cal_path = None
+            for name in possible_names:
+                potential_path = flat_search_dir / name
+                if potential_path.exists():
+                    cal_path = potential_path
+                    break
+            
+            if not cal_path:
+                # Default to standard naming if nothing found
+                cal_path = flat_search_dir / f'mflat{filter_name}.fits'
         
         if cal_path.exists():
             return cal_date, cal_path
@@ -420,6 +655,12 @@ class WombatPipeline:
         Returns:
             True if successful, False otherwise
         """
+        # Skip processing in dry-run mode
+        if self.dry_run:
+            if output_path:
+                print(f"    [DRY RUN] Would calibrate and save to: {output_path.name}")
+            return True
+        
         try:
             with fits.open(science_path) as hdul:
                 science_data = hdul[0].data.astype(np.float32)
@@ -462,6 +703,14 @@ class WombatPipeline:
         Returns:
             Dictionary with solution info
         """
+        if self.dry_run:
+            print(f"    [DRY RUN] Would attempt plate solving with ASTAP for: {fits_file.name}")
+            return {
+                'success': False,
+                'error_message': 'Skipped in dry-run mode',
+                'timestamp': datetime.now().isoformat()
+            }
+        
         for fov in fov_attempts:
             cmd = [
                 self.astap_path,
@@ -481,44 +730,45 @@ class WombatPipeline:
                 output = result.stdout + result.stderr
                 
                 if result.returncode == 0 and "Solution found:" in output:
-                    # Parse solution
-                    solution = {
-                        'success': True,
-                        'fov_deg': fov,
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    
-                    # Extract RA/Dec
-                    ra_match = re.search(r'Solution found:\s+(\d+):\s*(\d+)\s+([\d.]+)', output)
-                    dec_match = re.search(r'(-?\d+)°\s*(\d+)\s+([\d.]+)', output)
-                    
-                    if ra_match:
-                        ra_h, ra_m, ra_s = ra_match.groups()
-                        solution['ra_deg'] = float(ra_h) * 15 + float(ra_m) / 4 + float(ra_s) / 240
-                    
-                    if dec_match:
-                        dec_d, dec_m, dec_s = dec_match.groups()
-                        dec_deg = abs(float(dec_d)) + float(dec_m) / 60 + float(dec_s) / 3600
-                        if dec_d.startswith('-'):
-                            dec_deg *= -1
-                        solution['dec_deg'] = dec_deg
-                    
-                    # Extract solve time
-                    time_match = re.search(r'Solved in ([\d.]+) sec', output)
-                    if time_match:
-                        solution['solve_time'] = float(time_match.group(1))
-                    
-                    # Extract number of stars
-                    stars_match = re.search(r'(\d+) stars', output)
-                    if stars_match:
-                        solution['num_stars'] = int(stars_match.group(1))
-                    
-                    # Extract faintest magnitude
-                    mag_match = re.search(r'magnitude: ([\d.]+)', output)
-                    if mag_match:
-                        solution['faintest_mag'] = float(mag_match.group(1))
-                    
-                    return solution
+                    # ASTAP updated the FITS header with WCS solution
+                    # Read RA/Dec directly from the updated FITS header
+                    try:
+                        with fits.open(fits_file) as hdul:
+                            header = hdul[0].header
+                            
+                            solution = {
+                                'success': True,
+                                'fov_deg': fov,
+                                'timestamp': datetime.now().isoformat()
+                            }
+                            
+                            # Read RA/Dec from FITS header (CRVAL1/CRVAL2)
+                            if 'CRVAL1' in header and 'CRVAL2' in header:
+                                solution['ra_deg'] = float(header['CRVAL1'])
+                                solution['dec_deg'] = float(header['CRVAL2'])
+                            
+                            # Try to extract additional info from ASTAP output
+                            time_match = re.search(r'Solved in ([\d.]+) sec', output)
+                            if time_match:
+                                solution['solve_time'] = float(time_match.group(1))
+                            
+                            stars_match = re.search(r'(\d+) stars', output)
+                            if stars_match:
+                                solution['num_stars'] = int(stars_match.group(1))
+                            
+                            mag_match = re.search(r'magnitude: ([\d.]+)', output)
+                            if mag_match:
+                                solution['faintest_mag'] = float(mag_match.group(1))
+                            
+                            return solution
+                    except Exception as e:
+                        print(f"    Warning: Could not read WCS from FITS header: {e}")
+                        # Fall back to default solution
+                        return {
+                            'success': True,
+                            'fov_deg': fov,
+                            'timestamp': datetime.now().isoformat()
+                        }
                     
             except subprocess.TimeoutExpired:
                 print(f"    ASTAP timeout with FOV={fov}°")
@@ -1381,6 +1631,10 @@ class WombatPipeline:
             timestamp = datetime.now().strftime('%Y%m%d-%Hh%Mm%Ss')
             output_file = Path(f"AAVSO_AID_Report_{obscode}_{target_name}_{date_type}_{timestamp}.txt")
             
+            if self.dry_run:
+                print(f"    [DRY RUN] Would create AAVSO report: {output_file}")
+                return output_file
+            
             # Write AAVSO report
             with open(output_file, 'w') as f:
                 # Write header keywords
@@ -1674,6 +1928,10 @@ class WombatPipeline:
             # Write transformed photometry table
             output_file = Path(str(photometry_table_file).replace('.tbl', '_transformed.tbl'))
             
+            if self.dry_run:
+                print(f"    [DRY RUN] Would write transformed photometry table to: {output_file}")
+                return True
+            
             with open(output_file, 'w') as f:
                 # Write header with additional columns
                 new_header = header + ['V_std_T1', 'V_std_T2']
@@ -1734,6 +1992,10 @@ class WombatPipeline:
             filter_name: Filter used
             apphot_status: Status to set ('validate', 'nocomps', 'novsp', etc.)
         """
+        if self.dry_run:
+            print(f"    [DRY RUN] Would update target status: apphot='{apphot_status}' for {date}/{target_name}/{filter_name}")
+            return True
+        
         try:
             cursor = self.conn.cursor()
             cursor.execute('''
@@ -1830,6 +2092,10 @@ class WombatPipeline:
     
     def _write_photometry_table(self, output_file, rows, stars):
         """Write photometry table in tab-separated format."""
+        if self.dry_run:
+            print(f"    [DRY RUN] Would write photometry table to: {output_file}")
+            return
+        
         # Build column headers
         base_cols = ['Label', 'slice', 'Saturated', 'J.D.-2400000', 'JD_UTC', 'JD_SOBS', 
                      'HJD_UTC', 'BJD_TDB', 'AIRMASS', 'ALT_OBJ', 'CCD-TEMP', 'EXPTIME', 
@@ -2113,17 +2379,31 @@ class WombatPipeline:
             print(f"    ✗ Error in seeing profile analysis: {e}")
             return None
     
-    def process_science_targets(self):
-        """Process all unprocessed science targets (Phase 3)."""
+    def process_science_targets(self, night_names=None):
+        """Process all unprocessed science targets (Phase 3).
+        
+        Args:
+            night_names: List of night directory names to process. If None, process all targets.
+        """
         cursor = self.conn.cursor()
         
         # Get all targets that need processing (proc_bias and proc_flat are 0)
-        cursor.execute('''
-            SELECT date, target_name, filter, num_images 
-            FROM target 
-            WHERE proc_bias = 0 AND proc_flat = 0
-            ORDER BY date, target_name, filter
-        ''')
+        if night_names:
+            placeholders = ','.join(['?' for _ in night_names])
+            cursor.execute(f'''
+                SELECT date, target_name, filter, num_images 
+                FROM target 
+                WHERE proc_bias = 0 AND proc_flat = 0
+                AND date IN ({placeholders})
+                ORDER BY date, target_name, filter
+            ''', night_names)
+        else:
+            cursor.execute('''
+                SELECT date, target_name, filter, num_images 
+                FROM target 
+                WHERE proc_bias = 0 AND proc_flat = 0
+                ORDER BY date, target_name, filter
+            ''')
         
         targets = cursor.fetchall()
         
@@ -2155,14 +2435,22 @@ class WombatPipeline:
                 flat_date = 'nocal'
             
             # Get science files
-            light_dir = self.data_dir / date / 'Light' / target_name
+            # Check if data_dir is already the night directory (avoid double-nesting)
+            if self.data_dir.name == date:
+                light_dir = self.data_dir / 'Light' / target_name
+            else:
+                light_dir = self.data_dir / date / 'Light' / target_name
+                
             if not light_dir.exists():
                 print(f"  ERROR: Light directory not found: {light_dir}")
                 continue
                 
             # Create Reduced_images directory
             reduced_dir = light_dir / 'Reduced_images'
-            reduced_dir.mkdir(exist_ok=True)
+            if self.dry_run:
+                print(f"  [DRY RUN] Would create directory: {reduced_dir}")
+            else:
+                reduced_dir.mkdir(exist_ok=True)
             
             science_files = sorted(light_dir.glob('*.fits'))
             # Filter by the correct filter
@@ -2184,23 +2472,26 @@ class WombatPipeline:
                     solution = self.plate_solve_astap(output_file)
                     
                     # Record WCS solution
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO wcs 
-                        (date, target_name, filter, filename, success, ra_deg, dec_deg, 
-                         solve_time, num_stars, faintest_mag, fov_deg, error_message, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        date, target_name, filter_name, science_file.name,
-                        1 if solution['success'] else 0,
-                        solution.get('ra_deg'),
-                        solution.get('dec_deg'),
-                        solution.get('solve_time'),
-                        solution.get('num_stars'),
-                        solution.get('faintest_mag'),
-                        solution.get('fov_deg'),
-                        solution.get('error_message'),
-                        solution['timestamp']
-                    ))
+                    if self.dry_run:
+                        print(f"  [DRY RUN] Would record WCS solution for {science_file.name}")
+                    else:
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO wcs 
+                            (date, target_name, filter, filename, success, ra_deg, dec_deg, 
+                             solve_time, num_stars, faintest_mag, fov_deg, error_message, timestamp)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            date, target_name, filter_name, science_file.name,
+                            1 if solution['success'] else 0,
+                            solution.get('ra_deg'),
+                            solution.get('dec_deg'),
+                            solution.get('solve_time'),
+                            solution.get('num_stars'),
+                            solution.get('faintest_mag'),
+                            solution.get('fov_deg'),
+                            solution.get('error_message'),
+                            solution['timestamp']
+                        ))
                     
                     if solution['success']:
                         print(f"    ✓ Solved: RA={solution.get('ra_deg', 0):.4f}°, Dec={solution.get('dec_deg', 0):.4f}°")
@@ -2212,13 +2503,16 @@ class WombatPipeline:
                     print(f"    ✗ Calibration failed")
             
             # Update target table
-            cursor.execute('''
-                UPDATE target 
-                SET proc_bias = ?, proc_flat = ?
-                WHERE date = ? AND target_name = ? AND filter = ?
-            ''', (bias_date, flat_date, date, target_name, filter_name))
+            if self.dry_run:
+                print(f"  [DRY RUN] Would update target table with proc_bias={bias_date}, proc_flat={flat_date}")
+            else:
+                cursor.execute('''
+                    UPDATE target 
+                    SET proc_bias = ?, proc_flat = ?
+                    WHERE date = ? AND target_name = ? AND filter = ?
+                ''', (bias_date, flat_date, date, target_name, filter_name))
             
-            self.conn.commit()
+                self.conn.commit()
             print(f"  Processed {processed_count}/{len(science_files)} frames")
     
     def process_phase4_photometry(self):
@@ -2263,11 +2557,14 @@ class WombatPipeline:
             
             if not vsx_info:
                 print(f"  ✗ Target not found in VSX")
-                cursor.execute('''
-                    UPDATE target SET apphot = 'nocomps'
-                    WHERE date = ? AND target_name = ? AND filter = ?
-                ''', (date, target_name, filter_name))
-                self.conn.commit()
+                if self.dry_run:
+                    print(f"  [DRY RUN] Would update apphot status to 'nocomps'")
+                else:
+                    cursor.execute('''
+                        UPDATE target SET apphot = 'nocomps'
+                        WHERE date = ? AND target_name = ? AND filter = ?
+                    ''', (date, target_name, filter_name))
+                    self.conn.commit()
                 continue
             
             print(f"  ✓ VSX: {vsx_info['name']} (AUID: {vsx_info['auid']})")
@@ -2282,15 +2579,18 @@ class WombatPipeline:
             auid = vsx_info['auid']
             if auid and auid != target_name:
                 print(f"  Updating target_name from '{target_name}' to '{auid}'")
-                cursor.execute('''
-                    UPDATE target SET target_name = ?
-                    WHERE date = ? AND target_name = ? AND filter = ?
-                ''', (auid, date, target_name, filter_name))
-                cursor.execute('''
-                    UPDATE wcs SET target_name = ?
-                    WHERE date = ? AND target_name = ? AND filter = ?
-                ''', (auid, date, target_name, filter_name))
-                self.conn.commit()
+                if self.dry_run:
+                    print(f"  [DRY RUN] Would update target_name to '{auid}' in database")
+                else:
+                    cursor.execute('''
+                        UPDATE target SET target_name = ?
+                        WHERE date = ? AND target_name = ? AND filter = ?
+                    ''', (auid, date, target_name, filter_name))
+                    cursor.execute('''
+                        UPDATE wcs SET target_name = ?
+                        WHERE date = ? AND target_name = ? AND filter = ?
+                    ''', (auid, date, target_name, filter_name))
+                    self.conn.commit()
                 target_name = auid  # Use updated name for database queries
             
             # Get a representative FITS file for this target/filter (using directory name)
@@ -2360,12 +2660,15 @@ class WombatPipeline:
                     apphot_status = 'ready'
             
             # Update target table
-            cursor.execute('''
-                UPDATE target SET apphot = ?
-                WHERE date = ? AND target_name = ? AND filter = ?
-            ''', (apphot_status, date, target_name, filter_name))
-            
-            self.conn.commit()
+            if self.dry_run:
+                print(f"  [DRY RUN] Would update apphot status to '{apphot_status}'")
+            else:
+                cursor.execute('''
+                    UPDATE target SET apphot = ?
+                    WHERE date = ? AND target_name = ? AND filter = ?
+                ''', (apphot_status, date, target_name, filter_name))
+                
+                self.conn.commit()
             print(f"  Updated apphot status: {apphot_status}")
         
     def run(self, phase3_only=False, phase4_only=False):
@@ -2394,11 +2697,28 @@ class WombatPipeline:
             self.process_phase4_photometry()
         else:
             # Full pipeline: all phases
-            # Get all night directories (subdirectories in data/)
-            night_dirs = [d for d in self.data_dir.iterdir() if d.is_dir()]
-            night_dirs.sort()
+            # Check if data_dir itself is a night directory
+            # (contains Flat/Light/Bias or FLAT/LIGHT)
+            has_cal_or_light = (
+                (self.data_dir / 'Flat').exists() or 
+                (self.data_dir / 'Light').exists() or
+                (self.data_dir / 'Bias').exists() or
+                (self.data_dir / 'FLAT').exists() or
+                (self.data_dir / 'LIGHT').exists()
+            )
             
-            print(f"\nFound {len(night_dirs)} night directories")
+            if has_cal_or_light:
+                # data_dir IS the night directory
+                print(f"\nProcessing single night directory: {self.data_dir.name}")
+                night_dirs = [self.data_dir]
+            else:
+                # data_dir contains night subdirectories
+                night_dirs = [d for d in self.data_dir.iterdir() if d.is_dir()]
+                night_dirs.sort()
+                print(f"\nFound {len(night_dirs)} night directories")
+            
+            # Extract night names for filtering in phase 3
+            night_names = [night_dir.name for night_dir in night_dirs]
             
             for night_dir in night_dirs:
                 self.process_night(night_dir)
@@ -2407,8 +2727,8 @@ class WombatPipeline:
             print("Phase 1 & 2: Directory scan and calibration complete!")
             print("="*60)
             
-            # Phase 3: Process science targets
-            self.process_science_targets()
+            # Phase 3: Process science targets (only for nights we just scanned)
+            self.process_science_targets(night_names)
             
             # Phase 4: Photometry setup
             self.process_phase4_photometry()
@@ -2446,8 +2766,36 @@ class WombatPipeline:
 
 
 if __name__ == '__main__':
-    pipeline = WombatPipeline()
+    import argparse
+    
+    # Set UTF-8 encoding for console output on Windows
+    if sys.platform == 'win32':
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    
+    parser = argparse.ArgumentParser(description='Wombat Pipeline - Astronomical data processing')
+    parser.add_argument('--dry-run', action='store_true', 
+                        help='Show what would be done without modifying files or database')
+    parser.add_argument('--data-dir', default='./data', 
+                        help='Root directory containing night subdirectories (default: ./data)')
+    parser.add_argument('--db-path', default='wombatpipeline.db', 
+                        help='Path to SQLite database (default: wombatpipeline.db)')
+    parser.add_argument('--astap-path', default='C:/Program Files/astap/astap_cli.exe',
+                        help='Path to ASTAP CLI executable (default: C:/Program Files/astap/astap_cli.exe)')
+    parser.add_argument('--phase3-only', action='store_true', 
+                        help='Skip phases 1 & 2, only process science targets')
+    parser.add_argument('--phase4-only', action='store_true', 
+                        help='Skip phases 1-3, only process photometry setup')
+    
+    args = parser.parse_args()
+    
+    pipeline = WombatPipeline(
+        data_dir=args.data_dir,
+        db_path=args.db_path,
+        astap_path=args.astap_path,
+        dry_run=args.dry_run
+    )
     try:
-        pipeline.run()
+        pipeline.run(phase3_only=args.phase3_only, phase4_only=args.phase4_only)
     finally:
         pipeline.close()
