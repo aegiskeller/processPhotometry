@@ -444,11 +444,13 @@
             // Calculate HJD offset for cleaner display
             const hjdOffset = Math.floor(lightcurveData.T1[0].hjd);
             
-            const t1Data = lightcurveData.T1.filter(p => !rejectedPoints.has(`T1_${p.index}`));
-            const t2Data = lightcurveData.T2.filter(p => !rejectedPoints.has(`T2_${p.index}`));
+            // Filter out points rejected by sigma clipping AND user rejections
+            const t1Data = lightcurveData.T1.filter(p => !p.rejected && !rejectedPoints.has(`T1_${p.index}`));
+            const t2Data = lightcurveData.T2.filter(p => !p.rejected && !rejectedPoints.has(`T2_${p.index}`));
             
-            const t1Rejected = lightcurveData.T1.filter(p => rejectedPoints.has(`T1_${p.index}`));
-            const t2Rejected = lightcurveData.T2.filter(p => rejectedPoints.has(`T2_${p.index}`));
+            // Show both sigma-clipped and user-rejected points
+            const t1Rejected = lightcurveData.T1.filter(p => p.rejected || rejectedPoints.has(`T1_${p.index}`));
+            const t2Rejected = lightcurveData.T2.filter(p => p.rejected || rejectedPoints.has(`T2_${p.index}`));
             
             const traces = [
                 // T1 - Variable (blue)
@@ -528,7 +530,7 @@
             
             const layout = {
                 title: {
-                    text: `${lightcurveData.auid || lightcurveData.target_name} - ${lightcurveData.mag_type} Magnitudes`,
+                    text: `${lightcurveData.target_name} - Standardised`,
                     font: { color: '#e0e0e0' }
                 },
                 xaxis: {
@@ -540,7 +542,7 @@
                 },
                 yaxis: {
                     title: `Magnitude (${lightcurveData.filter})`,
-                    autorange: 'reversed',  // Lower magnitudes at top
+                    autorange: false,  // Disable autorange since we set it manually
                     showgrid: true,
                     zeroline: false,
                     gridcolor: '#333',
@@ -570,6 +572,27 @@
                 modeBarButtonsToRemove: ['toImage'],
                 displaylogo: false
             };
+            
+            // Calculate axis ranges based on remaining (non-rejected) data
+            const allT1 = t1Data.map(p => p.mag);
+            const allT2 = t2Data.map(p => p.mag);
+            const allMags = [...allT1, ...allT2];
+            
+            if (allMags.length > 0) {
+                const minMag = Math.min(...allMags);
+                const maxMag = Math.max(...allMags);
+                const magRange = maxMag - minMag;
+                const padding = magRange * 0.1;
+                
+                // Update y-axis range (reversed because magnitudes)
+                layout.yaxis.range = [maxMag + padding, minMag - padding];
+            }
+            
+            // Update title to show rejection count if any points rejected
+            if (rejectedPoints.size > 0) {
+                const numRejected = rejectedPoints.size / 2;  // Divide by 2 since we reject both T1 and T2
+                layout.title.text = `${lightcurveData.target_name} - Standardised [${numRejected} points rejected]`;
+            }
             
             const plotDiv = document.getElementById('lightcurve-plot');
             Plotly.newPlot(plotDiv, traces, layout, config);
@@ -713,8 +736,22 @@
                 });
                 
                 if (!rebuildResponse.ok) {
-                    throw new Error('Failed to rebuild AAVSO report');
+                    const errorData = await rebuildResponse.json();
+                    throw new Error(errorData.error || 'Failed to rebuild AAVSO report');
                 }
+                
+                const rebuildData = await rebuildResponse.json();
+                console.log('Rebuild response:', rebuildData);
+                
+                // Show detailed feedback about what was included
+                const totalPoints = 126; // Total frames
+                const includedMsg = `AAVSO Report Generated:\n` +
+                    `✓ ${rebuildData.points_included} observations included\n` +
+                    `✗ ${rebuildData.sigma_rejected || 0} rejected by sigma clipping\n` +
+                    `✗ ${rebuildData.user_rejected || 0} rejected by you\n` +
+                    `Total: ${totalPoints} frames processed`;
+                
+                showInfo(includedMsg, 'success');
                 
                 // Now download the approved report
                 const response = await fetch('/api/aavso/submit', {
@@ -747,10 +784,10 @@
                         })
                     });
                     
-                    showInfo('AAVSO report downloaded! Status updated to submitted.', 'success');
+                    showInfo(`✓ AAVSO report downloaded successfully!\n✓ ${rebuildData.points_included} observations ready for submission\n✓ Status updated to 'submitted'`, 'success');
                     loadTargets();
                 } else {
-                    showInfo('Error generating AAVSO report', 'error');
+                    showInfo('Error downloading AAVSO report file', 'error');
                 }
                 
             } catch (error) {

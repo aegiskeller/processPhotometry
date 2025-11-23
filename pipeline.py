@@ -29,7 +29,7 @@ from scipy.optimize import curve_fit
 
 
 class WombatPipeline:
-    def __init__(self, data_dir='./data', db_path='wombatpipeline.db', astap_path='C:/Program Files/astap/astap_cli.exe', dry_run=False):
+    def __init__(self, data_dir='./data', db_path='wombatpipeline.db', astap_path='C:/Program Files/astap/astap_cli.exe', dry_run=False, cleanup=False):
         """
         Initialize the pipeline.
         
@@ -42,6 +42,7 @@ class WombatPipeline:
         self.data_dir = Path(data_dir)
         self.db_path = db_path
         self.astap_path = astap_path
+        self.cleanup = cleanup
         self.conn = None
         self.dry_run = dry_run
         
@@ -71,6 +72,8 @@ class WombatPipeline:
                 proc_flat INTEGER DEFAULT 0,
                 apphot INTEGER DEFAULT 0,
                 submitted INTEGER DEFAULT 0,
+                chart_id TEXT,
+                variable_auid TEXT,
                 PRIMARY KEY (date, target_name, filter)
             )
         ''')
@@ -1060,7 +1063,8 @@ class WombatPipeline:
                             'label': star.get('label'),
                             'ra': ra_decimal,
                             'dec': dec_decimal,
-                            'chart_id': data.get('chartid')
+                            'chart_id': data.get('chartid'),
+                            'bands': {}  # Store original band magnitudes for transformation
                         }
                         
                         # Extract magnitudes from bands array
@@ -1071,6 +1075,9 @@ class WombatPipeline:
                             err = band_data.get('error')
                             
                             if band and mag is not None:
+                                # Store in bands dict for transformation
+                                comp_star['bands'][band] = mag
+                                
                                 # Map VSP band names to our convention
                                 # V, B, Rc, Ic → mag_v, mag_b, mag_r, mag_i
                                 band_map = {'V': 'v', 'B': 'b', 'Rc': 'r', 'Ic': 'i'}
@@ -1315,9 +1322,25 @@ class WombatPipeline:
             print(f"\n    Performing aperture photometry on {len(all_stars)} stars across {len(fits_files)} images...")
             print(f"    Apertures: r={aperture_params['aperture_radius']:.0f} px, annulus: {aperture_params['annulus_inner']:.0f}-{aperture_params['annulus_outer']:.0f} px")
             
-            # Observatory location (need to get from FITS or config)
-            # Using a default location - should be configurable
-            observatory = EarthLocation.of_site('Kitt Peak')
+            # Observatory location - try to get from FITS header, fall back to Kitt Peak
+            observatory = None
+            try:
+                with fits.open(fits_files[0]) as hdul:
+                    header = hdul[0].header
+                    if all(k in header for k in ['SITELAT', 'SITELONG', 'SITEELEV']):
+                        observatory = EarthLocation(
+                            lat=header['SITELAT'] * u.deg,
+                            lon=header['SITELONG'] * u.deg,
+                            height=header['SITEELEV'] * u.m
+                        )
+                        print(f"    Using observatory location from FITS header: lat={header['SITELAT']:.2f}°, lon={header['SITELONG']:.2f}°, elev={header['SITEELEV']:.0f}m")
+            except Exception as e:
+                print(f"    Warning: Could not read observatory location from FITS header: {e}")
+            
+            if observatory is None:
+                # Default fallback
+                observatory = EarthLocation.of_site('Kitt Peak')
+                print(f"    Warning: Using default Kitt Peak location - airmass calculations may be incorrect!")
             
             # Photometry results for all images
             phot_table_rows = []
@@ -1594,7 +1617,20 @@ class WombatPipeline:
                 date_col = 'JD_UTC'
             
             # Verify required columns exist
-            required_cols = [date_col, 'AIRMASS', 'EXPTIME', 'Source_AMag_T1', 'Source_AMag_Err_T1']
+            required_cols = [date_col, 'AIRMASS', 'EXPTIME', 'Source_AMag_Err_T1']
+            
+            # Check if transformed magnitudes are available
+            use_transformed = 'V_std_T1' in col_idx and 'V_std_T2' in col_idx
+            
+            if use_transformed:
+                print(f"    Using transformed standard magnitudes")
+                required_cols.append('V_std_T1')
+                trans_flag = "YES"
+            else:
+                print(f"    Using instrumental magnitudes (no transformation available)")
+                required_cols.append('Source_AMag_T1')
+                trans_flag = "NO"
+            
             missing_cols = [col for col in required_cols if col not in col_idx]
             if missing_cols:
                 print(f"    ✗ Missing required columns: {missing_cols}")
@@ -1660,8 +1696,17 @@ class WombatPipeline:
                     # DATE: JD/HJD/BJD with appropriate precision
                     date_value = f"{float(values[col_idx[date_col]]):.6f}"
                     
-                    # MAG: Target apparent magnitude (3 decimal places)
-                    mag = f"{float(values[col_idx['Source_AMag_T1']]):.3f}"
+                    # MAG: Target magnitude (3 decimal places)
+                    if use_transformed:
+                        # Use calibrated standard magnitude
+                        try:
+                            mag_value = float(values[col_idx['V_std_T1']])
+                            mag = f"{mag_value:.3f}"
+                        except (ValueError, KeyError):
+                            continue  # Skip row if transformed mag not available
+                    else:
+                        # Use instrumental magnitude
+                        mag = f"{float(values[col_idx['Source_AMag_T1']]):.3f}"
                     
                     # MERR: Target magnitude error (3 decimal places)
                     merr = f"{float(values[col_idx['Source_AMag_Err_T1']]):.3f}"
@@ -1669,8 +1714,8 @@ class WombatPipeline:
                     # FILT: Filter used
                     filt = filter_used
                     
-                    # TRANS: Transformation applied (NO for untransformed)
-                    trans = "NO"
+                    # TRANS: Transformation applied
+                    trans = trans_flag
                     
                     # MTYPE: Magnitude type (STD = standard, DIF = differential)
                     mtype = "STD"
@@ -1691,11 +1736,24 @@ class WombatPipeline:
                     kname = check_star_label
                     
                     # KMAG: Check star magnitude
-                    if use_ensemble:
-                        # Use apparent magnitude
+                    if use_transformed:
+                        # Use transformed standard magnitude
+                        try:
+                            kmag = f"{float(values[col_idx['V_std_T2']]):.3f}"
+                        except (ValueError, KeyError):
+                            # Fallback to instrumental
+                            if use_ensemble:
+                                kmag = f"{float(values[col_idx[check_star_amag_col]]):.3f}"
+                            else:
+                                check_sky = float(values[col_idx[check_star_sky_col]])
+                                exptime = float(values[col_idx['EXPTIME']])
+                                kmag_value = -2.5 * np.log10(check_sky / exptime)
+                                kmag = f"{kmag_value:.3f}"
+                    elif use_ensemble:
+                        # Use instrumental apparent magnitude
                         kmag = f"{float(values[col_idx[check_star_amag_col]]):.3f}"
                     else:
-                        # Use instrumental magnitude
+                        # Use instrumental magnitude from counts
                         check_sky = float(values[col_idx[check_star_sky_col]])
                         exptime = float(values[col_idx['EXPTIME']])
                         kmag_value = -2.5 * np.log10(check_sky / exptime)
@@ -1799,7 +1857,7 @@ class WombatPipeline:
             # Collect transformation data points from matched comparison stars
             data_points = []
             
-            for row in rows:
+            for row_idx, row in enumerate(rows):
                 for label, aavso_data in vsp_matches.items():
                     # Skip T1 (variable) - we'll apply transformation to it later
                     if label == 'T1':
@@ -1842,7 +1900,8 @@ class WombatPipeline:
                             'inst_mag': inst_mag,
                             'std_mag': std_v_mag,
                             'color': color_index,
-                            'delta': delta_mag
+                            'delta': delta_mag,
+                            'row_idx': row_idx
                         })
             
             if len(data_points) < 2:
@@ -1851,8 +1910,185 @@ class WombatPipeline:
             
             print(f"    Collected {len(data_points)} data points from comparison stars")
             
+            # Calculate per-frame zero points for sigma clipping
+            frame_zps = []
+            for row_idx, row in enumerate(rows):
+                frame_data = []
+                for label, aavso_data in vsp_matches.items():
+                    if label == 'T1':
+                        continue
+                    
+                    inst_mag_col = f"Source_AMag_{label}"
+                    if inst_mag_col not in col_idx:
+                        continue
+                    
+                    try:
+                        inst_mag = float(row[inst_mag_col])
+                    except (ValueError, TypeError, KeyError):
+                        continue
+                    
+                    bands = aavso_data.get('bands', {})
+                    std_v_mag = bands.get('V')
+                    std_i_mag = bands.get('Ic') or bands.get('I')
+                    
+                    if std_v_mag is None or std_i_mag is None:
+                        continue
+                    
+                    if color_basis == 'vi':
+                        color_index = std_v_mag - std_i_mag
+                    else:
+                        continue
+                    
+                    delta_mag = std_v_mag - inst_mag
+                    frame_data.append({
+                        'color': color_index,
+                        'delta': delta_mag
+                    })
+                
+                if len(frame_data) >= 2:
+                    # Calculate ZP and k for this frame
+                    n = len(frame_data)
+                    sum_color = sum(p['color'] for p in frame_data)
+                    sum_delta = sum(p['delta'] for p in frame_data)
+                    sum_color_sq = sum(p['color']**2 for p in frame_data)
+                    sum_color_delta = sum(p['color'] * p['delta'] for p in frame_data)
+                    
+                    denom = n * sum_color_sq - sum_color**2
+                    if abs(denom) < 1e-10:
+                        zp = sum_delta / n
+                        k = 0.0
+                    else:
+                        k = (n * sum_color_delta - sum_color * sum_delta) / denom
+                        zp = (sum_delta - k * sum_color) / n
+                    
+                    # Calculate RMS for this frame
+                    residuals = []
+                    for p in frame_data:
+                        predicted = zp + k * p['color']
+                        residuals.append(p['delta'] - predicted)
+                    rms = np.sqrt(sum(r**2 for r in residuals) / len(residuals))
+                    
+                    frame_zps.append({
+                        'row_idx': row_idx,
+                        'label': row.get('Label', ''),
+                        'hjd': row.get('HJD_UTC', ''),
+                        'n_stars': n,
+                        'zp': zp,
+                        'k': k,
+                        'rms': rms
+                    })
+            
+            # Iterative 3-sigma clipping on ZP and k until convergence
+            if len(frame_zps) > 0:
+                current_frames = frame_zps.copy()
+                all_rejected = []
+                round_num = 0
+                
+                while True:
+                    round_num += 1
+                    zps_list = [f['zp'] for f in current_frames]
+                    ks_list = [f['k'] for f in current_frames]
+                    
+                    mean_zp = np.mean(zps_list)
+                    std_zp = np.std(zps_list)
+                    mean_k = np.mean(ks_list)
+                    std_k = np.std(ks_list)
+                    
+                    # Apply 3-sigma clip
+                    next_frames = []
+                    round_rejected = []
+                    
+                    for f in current_frames:
+                        if (abs(f['zp'] - mean_zp) <= 3 * std_zp and 
+                            abs(f['k'] - mean_k) <= 3 * std_k):
+                            next_frames.append(f)
+                        else:
+                            round_rejected.append(f)
+                    
+                    if len(round_rejected) == 0:
+                        # Converged - no more outliers
+                        print(f"    Iterative 3-sigma clipping converged after {round_num} rounds")
+                        print(f"      Final: {len(next_frames)}/{len(frame_zps)} frames retained")
+                        good_frames = next_frames
+                        rejected_frames = all_rejected
+                        break
+                    else:
+                        print(f"    Round {round_num}: {len(next_frames)}/{len(current_frames)} frames retained, {len(round_rejected)} rejected")
+                        all_rejected.extend(round_rejected)
+                        current_frames = next_frames
+                        
+                        # Safety check to prevent infinite loop
+                        if round_num > 10 or len(next_frames) < 10:
+                            print(f"    Warning: Stopped after {round_num} rounds")
+                            good_frames = next_frames
+                            rejected_frames = all_rejected
+                            break
+                
+                if round_num == 1:
+                    # Store initial stats for first round
+                    initial_zps = [f['zp'] for f in frame_zps]
+                    initial_ks = [f['k'] for f in frame_zps]
+                    mean_zp = np.mean(initial_zps)
+                    std_zp = np.std(initial_zps)
+                    mean_k = np.mean(initial_ks)
+                    std_k = np.std(initial_ks)
+                    zps_list = initial_zps
+                    ks_list = initial_ks
+                
+                print(f"    Total rejected: {len(rejected_frames)} frames")
+                
+                # Write ZP log file
+                log_file = Path(str(photometry_table_file).replace('.tbl', '_zp.log'))
+                with open(log_file, 'w') as f:
+                    f.write("# Zero Point Analysis Log\n")
+                    f.write(f"# Photometry file: {Path(photometry_table_file).name}\n")
+                    f.write(f"# Color basis: {color_basis.upper()}\n")
+                    f.write(f"# Sigma clipping: Iterative 3-sigma (converged in {round_num} rounds)\n")
+                    f.write(f"# Total frames: {len(frame_zps)}\n")
+                    f.write(f"# Good frames (after clipping): {len(good_frames)}\n")
+                    f.write(f"# Rejected frames: {len(rejected_frames)}\n")
+                    f.write("#\n")
+                    f.write(f"# Statistics BEFORE clipping:\n")
+                    f.write(f"#   ZP:  mean={mean_zp:.3f}, std={std_zp:.3f}, range={min(zps_list):.3f} to {max(zps_list):.3f}\n")
+                    f.write(f"#   k:   mean={mean_k:.3f}, std={std_k:.3f}\n")
+                    
+                    if good_frames:
+                        good_zps = [f['zp'] for f in good_frames]
+                        good_ks = [f['k'] for f in good_frames]
+                        good_rms = [f['rms'] for f in good_frames]
+                        f.write(f"#\n")
+                        f.write(f"# Statistics AFTER iterative 3-sigma clipping:\n")
+                        f.write(f"#   ZP:  mean={np.mean(good_zps):.3f}, std={np.std(good_zps):.3f}, range={min(good_zps):.3f} to {max(good_zps):.3f}\n")
+                        f.write(f"#   k:   mean={np.mean(good_ks):.3f}, std={np.std(good_ks):.3f}\n")
+                        f.write(f"#   RMS: mean={np.mean(good_rms):.3f}, median={np.median(good_rms):.3f}\n")
+                    
+                    f.write("#\n")
+                    f.write(f"{'Frame':<50} {'N_stars':>7} {'ZP':>8} {'k':>8} {'RMS':>8} {'HJD':>15} {'Status':>10}\n")
+                    f.write("-" * 120 + "\n")
+                    
+                    for fdata in frame_zps:
+                        status = "GOOD" if fdata in good_frames else "REJECTED"
+                        f.write(f"{fdata['label']:<50} {fdata['n_stars']:>7} {fdata['zp']:>8.3f} "
+                               f"{fdata['k']:>8.3f} {fdata['rms']:>8.3f} {fdata['hjd']:>15} {status:>10}\n")
+                
+                print(f"    ✓ ZP log written: {log_file.name}")
+                
+                # Use clipped data for final transformation
+                if good_frames:
+                    # Recalculate using only good frames
+                    good_data_points = []
+                    good_row_indices = set(f['row_idx'] for f in good_frames)
+                    
+                    for p in data_points:
+                        if p['row_idx'] in good_row_indices:
+                            good_data_points.append(p)
+                    
+                    if len(good_data_points) >= 2:
+                        data_points = good_data_points
+                        print(f"    Using {len(data_points)} data points from clipped frames")
+            
             # Fit linear transformation: delta_mag = ZP + k * color
-            # Using least squares fit
+            # Using least squares fit on clipped data
             n = len(data_points)
             sum_color = sum(p['color'] for p in data_points)
             sum_delta = sum(p['delta'] for p in data_points)
@@ -1880,7 +2116,7 @@ class WombatPipeline:
             # Count unique stars
             unique_stars = len(set(p['label'] for p in data_points))
             
-            print(f"    ✓ Transformation computed:")
+            print(f"    ✓ Transformation computed (after clipping):")
             print(f"      Zero point: {zero_point:.3f}")
             print(f"      Color coefficient (k): {color_coeff:.3f}")
             print(f"      RMS residual: {rms:.3f} mag")
@@ -2495,6 +2731,23 @@ class WombatPipeline:
                     
                     if solution['success']:
                         print(f"    ✓ Solved: RA={solution.get('ra_deg', 0):.4f}°, Dec={solution.get('dec_deg', 0):.4f}°")
+                        # Optionally remove ASTAP generated .wcs and .ini files for tidiness
+                        if self.cleanup:
+                            wcs_path = output_file.with_suffix('.wcs')
+                            ini_path = output_file.with_suffix('.ini')
+                            try:
+                                if self.dry_run:
+                                    print(f"  [DRY RUN] Would remove: {wcs_path}")
+                                    print(f"  [DRY RUN] Would remove: {ini_path}")
+                                else:
+                                    if wcs_path.exists():
+                                        wcs_path.unlink()
+                                        print(f"    Removed: {wcs_path}")
+                                    if ini_path.exists():
+                                        ini_path.unlink()
+                                        print(f"    Removed: {ini_path}")
+                            except Exception as e:
+                                print(f"    Warning: cleanup failed: {e}")
                     else:
                         print(f"    ✗ Failed: {solution.get('error_message', 'Unknown error')}")
                         
@@ -2547,7 +2800,8 @@ class WombatPipeline:
             ''', (date, target_name, filter_name))
             
             result = cursor.fetchone()
-            if result and result[0] not in [None, '', 0, 'nocal']:
+            # Skip if already processed (but allow 'platesolved' and other early statuses to continue)
+            if result and result[0] not in [None, '', 0, 'nocal', 'platesolved']:
                 print(f"  Already processed (apphot={result[0]})")
                 continue
             
@@ -2572,31 +2826,15 @@ class WombatPipeline:
             print(f"    Mag: {vsx_info['mag_max']} - {vsx_info['mag_min']}")
             print(f"    Coordinates: RA={vsx_info['ra_deg']:.4f}°, Dec={vsx_info['dec_deg']:.4f}°")
             
-            # Store directory name (may differ from AUID)
-            dir_name = target_name
-            
-            # Update target_name with AUID if different from directory name
-            auid = vsx_info['auid']
-            if auid and auid != target_name:
-                print(f"  Updating target_name from '{target_name}' to '{auid}'")
-                if self.dry_run:
-                    print(f"  [DRY RUN] Would update target_name to '{auid}' in database")
-                else:
-                    cursor.execute('''
-                        UPDATE target SET target_name = ?
-                        WHERE date = ? AND target_name = ? AND filter = ?
-                    ''', (auid, date, target_name, filter_name))
-                    cursor.execute('''
-                        UPDATE wcs SET target_name = ?
-                        WHERE date = ? AND target_name = ? AND filter = ?
-                    ''', (auid, date, target_name, filter_name))
-                    self.conn.commit()
-                target_name = auid  # Use updated name for database queries
-            
-            # Get a representative FITS file for this target/filter (using directory name)
-            light_dir = self.data_dir / date / 'Light' / dir_name / 'Reduced_images'
+            # Get a representative FITS file for this target/filter (using target_name as directory name)
+            # Check if data_dir is already the night directory (avoid double-nesting)
+            if self.data_dir.name == date:
+                light_dir = self.data_dir / 'Light' / target_name / 'Reduced_images'
+            else:
+                light_dir = self.data_dir / date / 'Light' / target_name / 'Reduced_images'
+                
             if not light_dir.exists():
-                print(f"  ✗ Reduced images directory not found")
+                print(f"  ✗ Reduced images directory not found: {light_dir}")
                 continue
             
             fits_files = [f for f in light_dir.glob('*.fits') if self.get_filter_from_fits(f) == filter_name]
@@ -2634,6 +2872,11 @@ class WombatPipeline:
                 target_name
             )
             
+            # Extract chart_id from comparison stars
+            chart_id = None
+            if comp_stars and isinstance(comp_stars, list) and len(comp_stars) > 0:
+                chart_id = comp_stars[0].get('chart_id')
+            
             # Handle VSP service down
             if comp_stars == 'novsp':
                 print(f"  ✗ VSP service unavailable")
@@ -2659,25 +2902,288 @@ class WombatPipeline:
                     print(f"  ✓ {len(filtered_stars)} suitable comparison stars available")
                     apphot_status = 'ready'
             
+            # Extract variable star AUID from VSX info
+            variable_auid = vsx_info.get('auid', None)
+            
             # Update target table
             if self.dry_run:
                 print(f"  [DRY RUN] Would update apphot status to '{apphot_status}'")
+                if chart_id:
+                    print(f"  [DRY RUN] Would save chart_id: {chart_id}")
+                if variable_auid:
+                    print(f"  [DRY RUN] Would save variable_auid: {variable_auid}")
             else:
                 cursor.execute('''
-                    UPDATE target SET apphot = ?
+                    UPDATE target SET apphot = ?, chart_id = ?, variable_auid = ?
                     WHERE date = ? AND target_name = ? AND filter = ?
-                ''', (apphot_status, date, target_name, filter_name))
+                ''', (apphot_status, chart_id, variable_auid, date, target_name, filter_name))
                 
                 self.conn.commit()
             print(f"  Updated apphot status: {apphot_status}")
+            if chart_id:
+                print(f"  Saved chart_id: {chart_id}")
+            if variable_auid:
+                print(f"  Saved variable_auid: {variable_auid}")
+    
+    def process_phase5_aperture_photometry(self):
+        """Process Phase 5: Execute aperture photometry on ready targets."""
+        cursor = self.conn.cursor()
         
-    def run(self, phase3_only=False, phase4_only=False):
+        # Get all targets with apphot = 'ready'
+        cursor.execute('''
+            SELECT DISTINCT date, target_name, filter
+            FROM target
+            WHERE apphot = 'ready'
+            ORDER BY date, target_name, filter
+        ''')
+        
+        targets = cursor.fetchall()
+        
+        if not targets:
+            print("\nNo targets ready for aperture photometry")
+            return
+            
+        print(f"\n{'='*60}")
+        print(f"PHASE 5: Aperture photometry for {len(targets)} target(s)")
+        print(f"{'='*60}")
+        
+        for date, target_name, filter_name in targets:
+            print(f"\nPhase 5: {date}/{target_name} (filter: {filter_name})")
+            
+            # Get VSX information (re-query to have all data)
+            vsx_info = self.query_vsx(target_name)
+            if not vsx_info:
+                print(f"  ✗ Could not retrieve VSX info")
+                continue
+            
+            # Get FITS files
+            if self.data_dir.name == date:
+                light_dir = self.data_dir / 'Light' / target_name / 'Reduced_images'
+            else:
+                light_dir = self.data_dir / date / 'Light' / target_name / 'Reduced_images'
+            
+            if not light_dir.exists():
+                print(f"  ✗ Reduced images directory not found")
+                continue
+            
+            fits_files = sorted([f for f in light_dir.glob('*.fits') if self.get_filter_from_fits(f) == filter_name])
+            if not fits_files:
+                print(f"  ✗ No FITS files found")
+                continue
+            
+            print(f"  Found {len(fits_files)} images")
+            
+            # Get FOV and retrieve comparison stars
+            sample_fits = fits_files[0]
+            fov = self.get_fov_from_wcs(sample_fits)
+            if not fov:
+                fov = 60.0
+            
+            # Query VSP for comparison stars
+            comp_stars = self.query_vsp_photometry(
+                vsx_info['ra_deg'],
+                vsx_info['dec_deg'],
+                fov,
+                target_name
+            )
+            
+            if not comp_stars or comp_stars == 'novsp':
+                print(f"  ✗ Could not retrieve comparison stars")
+                continue
+            
+            # Store original VSP data for transformation (before filtering/relabeling)
+            vsp_catalog = {star.get('auid'): star for star in comp_stars if isinstance(comp_stars, list)}
+            
+            # Filter comparison stars
+            filtered_stars = self.filter_comparison_stars(
+                comp_stars,
+                sample_fits,
+                vsx_info,
+                filter_name
+            )
+            
+            if not filtered_stars or len(filtered_stars) == 0:
+                print(f"  ✗ No suitable comparison stars")
+                continue
+            
+            # Select check star and comparison stars
+            stars_dict = self.select_check_star(filtered_stars, vsx_info)
+            if not stars_dict:
+                print(f"  ✗ Could not select check star")
+                continue
+            
+            # Measure seeing profile for aperture sizing
+            aperture_params = self.fit_psf_and_determine_aperture(sample_fits)
+            if not aperture_params:
+                print(f"  ✗ Could not determine aperture parameters")
+                continue
+            
+            # Perform aperture photometry
+            output_file = light_dir / f"{target_name}_{filter_name}_photometry.tbl"
+            result_file = self.perform_aperture_photometry(
+                fits_files,
+                stars_dict,
+                vsx_info,
+                aperture_params,
+                filter_name,
+                output_file
+            )
+            
+            if result_file:
+                print(f"  ✓ Photometry complete: {result_file.name}")
+                
+                # Create VSP matches dict for transformation
+                vsp_matches = {}
+                # Add T1 (variable star) with VSX info
+                vsp_matches['T1'] = {
+                    'auid': vsx_info.get('auid'),
+                    'bands': {}  # Variable star - no catalog mags
+                }
+                
+                # Add check star (T2)
+                check_star = stars_dict.get('check_star', {})
+                check_auid = check_star.get('auid')
+                check_label = check_star.get('label', 'T2')
+                if check_auid and check_auid in vsp_catalog:
+                    vsp_matches[check_label] = vsp_catalog[check_auid]
+                
+                # Add comparison stars (C3, C4, etc.)
+                for comp_star in stars_dict.get('comp_stars', []):
+                    comp_auid = comp_star.get('auid')
+                    comp_label = comp_star.get('label')
+                    if comp_auid and comp_label and comp_auid in vsp_catalog:
+                        vsp_matches[comp_label] = vsp_catalog[comp_auid]
+                
+                print(f"  VSP matches created: {len(vsp_matches)} stars")
+                for label, data in list(vsp_matches.items())[:3]:  # Show first 3
+                    bands_dict = data.get('bands', {})
+                    if isinstance(bands_dict, dict):
+                        bands_str = ', '.join([f"{b}={v:.2f}" for b, v in bands_dict.items()])
+                    else:
+                        bands_str = "none"
+                    print(f"    {label}: {data.get('auid')} - bands: {bands_str}")
+                
+                # Transform to standard magnitudes
+                print(f"\n  Performing magnitude transformation...")
+                transform_result = self.transform_to_standard_magnitudes(
+                    result_file,
+                    vsp_matches,
+                    color_basis='vi'  # Use V-I color by default
+                )
+                
+                if transform_result and transform_result.get('success'):
+                    print(f"  ✓ Transformation successful")
+                    print(f"    ZP={transform_result['zero_point']:.3f}, k={transform_result['color_coefficient']:.3f}, RMS={transform_result['rms']:.3f}")
+                else:
+                    print(f"  ⚠ Transformation failed, AAVSO report will use instrumental magnitudes")
+                
+                # Update database status to 'validate' - ready for validation
+                if not self.dry_run:
+                    cursor.execute('''
+                        UPDATE target SET apphot = 'validate'
+                        WHERE date = ? AND target_name = ? AND filter = ?
+                    ''', (date, target_name, filter_name))
+                    self.conn.commit()
+            else:
+                print(f"  ✗ Photometry failed")
+    
+    def process_phase6_aavso_reports(self, obscode='KSCA', date_type='HJD', obstype='CCD', notes=''):
+        """Process Phase 6: Generate AAVSO extended format reports from photometry tables."""
+        cursor = self.conn.cursor()
+        
+        # Get all targets with apphot = 'validate' (ready for AAVSO report generation)
+        cursor.execute('''
+            SELECT DISTINCT date, target_name, filter
+            FROM target
+            WHERE apphot = 'validate'
+            ORDER BY date, target_name, filter
+        ''')
+        
+        targets = cursor.fetchall()
+        
+        if not targets:
+            print("\nNo targets ready for validation (apphot='validate')")
+            return
+            
+        print(f"\n{'='*60}")
+        print(f"PHASE 6: AAVSO report generation for {len(targets)} target(s)")
+        print(f"{'='*60}")
+        
+        for date, target_name, filter_name in targets:
+            print(f"\nPhase 6: {date}/{target_name} (filter: {filter_name})")
+            
+            # Find photometry table
+            if self.data_dir.name == date:
+                light_dir = self.data_dir / 'Light' / target_name / 'Reduced_images'
+            else:
+                light_dir = self.data_dir / date / 'Light' / target_name / 'Reduced_images'
+            
+            if not light_dir.exists():
+                print(f"  ✗ Reduced images directory not found")
+                continue
+            
+            # Look for photometry table (prefer transformed if available)
+            phot_table_transformed = light_dir / f"{target_name}_{filter_name}_photometry_transformed.tbl"
+            phot_table_original = light_dir / f"{target_name}_{filter_name}_photometry.tbl"
+            
+            if phot_table_transformed.exists():
+                phot_table = phot_table_transformed
+                print(f"  Found transformed photometry table: {phot_table.name}")
+            elif phot_table_original.exists():
+                phot_table = phot_table_original
+                print(f"  Found photometry table: {phot_table.name}")
+            else:
+                print(f"  ✗ Photometry table not found")
+                continue
+            
+            # Get VSP chart ID from database (from Phase 4)
+            cursor.execute('''
+                SELECT chart_id FROM target
+                WHERE date = ? AND target_name = ? AND filter = ?
+            ''', (date, target_name, filter_name))
+            
+            result = cursor.fetchone()
+            chart_id = result[0] if result and result[0] else 'NA'
+            
+            # Create AAVSO report
+            report_file = self.create_aavso_report(
+                phot_table,
+                obscode=obscode,
+                chart_id=chart_id,
+                notes=notes,
+                date_type=date_type,
+                obstype=obstype
+            )
+            
+            if report_file:
+                # Move report to the target directory
+                if not self.dry_run and report_file.exists():
+                    import shutil
+                    dest_file = light_dir / report_file.name
+                    shutil.move(str(report_file), str(dest_file))
+                    print(f"  ✓ AAVSO report saved: {dest_file.name}")
+                    
+                    # Update database status
+                    cursor.execute('''
+                        UPDATE target SET apphot = 'report'
+                        WHERE date = ? AND target_name = ? AND filter = ?
+                    ''', (date, target_name, filter_name))
+                    self.conn.commit()
+                else:
+                    print(f"  ✓ AAVSO report created: {report_file.name}")
+            else:
+                print(f"  ✗ AAVSO report generation failed")
+        
+    def run(self, phase3_only=False, phase4_only=False, phase5_only=False, phase6_only=False, obscode='KSCA'):
         """
         Main pipeline execution.
         
         Args:
             phase3_only: If True, skip phases 1 & 2 and only process science targets
             phase4_only: If True, skip phases 1-3 and only process photometry setup
+            phase5_only: If True, skip phases 1-4 and only process aperture photometry
+            phase6_only: If True, skip phases 1-5 and only generate AAVSO reports
+            obscode: AAVSO observer code for reports (default: KSCA)
         """
         print(f"Starting Wombat Pipeline")
         print(f"Data directory: {self.data_dir}")
@@ -2688,7 +3194,13 @@ class WombatPipeline:
             
         self.setup_database()
         
-        if phase4_only:
+        if phase6_only:
+            # Skip everything and just do Phase 6
+            self.process_phase6_aavso_reports(obscode=obscode)
+        elif phase5_only:
+            # Skip everything and just do Phase 5
+            self.process_phase5_aperture_photometry()
+        elif phase4_only:
             # Skip everything and just do Phase 4
             self.process_phase4_photometry()
         elif phase3_only:
@@ -2732,6 +3244,12 @@ class WombatPipeline:
             
             # Phase 4: Photometry setup
             self.process_phase4_photometry()
+            
+            # Phase 5: Aperture photometry
+            self.process_phase5_aperture_photometry()
+            
+            # Phase 6: AAVSO report generation
+            self.process_phase6_aavso_reports(obscode=obscode)
         
         print("\n" + "="*60)
         print("Pipeline processing complete!")
@@ -2782,10 +3300,18 @@ if __name__ == '__main__':
                         help='Path to SQLite database (default: wombatpipeline.db)')
     parser.add_argument('--astap-path', default='C:/Program Files/astap/astap_cli.exe',
                         help='Path to ASTAP CLI executable (default: C:/Program Files/astap/astap_cli.exe)')
+    parser.add_argument('--cleanup', action='store_true',
+                        help='Remove ASTAP-generated .ini and .wcs files after successful plate solving')
     parser.add_argument('--phase3-only', action='store_true', 
                         help='Skip phases 1 & 2, only process science targets')
     parser.add_argument('--phase4-only', action='store_true', 
                         help='Skip phases 1-3, only process photometry setup')
+    parser.add_argument('--phase5-only', action='store_true', 
+                        help='Skip phases 1-4, only process aperture photometry')
+    parser.add_argument('--phase6-only', action='store_true', 
+                        help='Skip phases 1-5, only generate AAVSO reports')
+    parser.add_argument('--obscode', default='KSCA',
+                        help='AAVSO observer code for reports (default: KSCA)')
     
     args = parser.parse_args()
     
@@ -2793,9 +3319,12 @@ if __name__ == '__main__':
         data_dir=args.data_dir,
         db_path=args.db_path,
         astap_path=args.astap_path,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        cleanup=args.cleanup
     )
     try:
-        pipeline.run(phase3_only=args.phase3_only, phase4_only=args.phase4_only)
+        pipeline.run(phase3_only=args.phase3_only, phase4_only=args.phase4_only, 
+                     phase5_only=args.phase5_only, phase6_only=args.phase6_only,
+                     obscode=args.obscode)
     finally:
         pipeline.close()

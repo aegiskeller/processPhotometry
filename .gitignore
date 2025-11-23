@@ -44,3 +44,16 @@ G59*
 wombat*
 AAV*
 BWEri*
+check*
+test*
+set*
+reset*
+show*
+migrate_database*
+mark_submitted*
+*.txt
+find_next*
+find_v*
+list_all*
+*.log
+analyze_zp_outliers*
